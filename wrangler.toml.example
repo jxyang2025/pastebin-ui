@@ -1,0 +1,48 @@
+# ============================================================================
+# wrangler.toml 模板
+# ----------------------------------------------------------------------------
+# 真正的 wrangler.toml 已被 .gitignore 忽略，请不要把填好真实 ID 的版本提交上来。
+#
+# 用法：
+#   1) 本地开发：复制本文件为 wrangler.toml，填上自己的值即可。
+#   2) GitHub Actions 自动部署：无需手工创建，CI 会读取下面这几个环境变量
+#      并用 scripts/gen-wrangler.mjs 生成 wrangler.toml：
+#         CF_ACCOUNT_ID     ← GitHub Secrets   （Cloudflare Account ID）
+#         PB_KV_ID          ← GitHub Secrets   （文本 KV 的 namespace id）
+#         PBIMGS_KV_ID      ← GitHub Secrets   （文件 KV 的 namespace id）
+#         BASE_URL          ← GitHub Variables （站点地址，如 https://example.com）
+#         ALLOWED_ORIGINS   ← GitHub Variables （允许跨域调用 API 的来源，逗号分隔）
+#
+#   占位符（__XXX__）在 CI 中会被自动替换，本地手填时直接覆盖即可。
+# ============================================================================
+
+name = "pastebin-worker"
+compatibility_date = "2024-09-23"
+# account_id 通过环境变量 CLOUDFLARE_ACCOUNT_ID 注入（wrangler 原生支持），
+# 不再写进仓库。本地如未登录 Cloudflare，可自行取消下面这行的注释并填入。
+# account_id = "__CF_ACCOUNT_ID__"
+main = "src/index.ts"
+workers_dev = false
+
+[vars]
+ENVIRONMENT = "production"
+# 站点对外访问地址，用于拼接分享链接。留空则由请求自身 origin 推导。
+BASE_URL = "__BASE_URL__"
+# 仅允许这些来源跨域调用 /api/*，逗号分隔；填 * 表示不限制（不建议）。
+# 线上前端与 Worker 同源部署时，保持只有自己的域名即可。
+ALLOWED_ORIGINS = "__ALLOWED_ORIGINS__"
+# 上传文件的保留秒数（默认 1 年）。KV 无 TTL 会导致存储只增不减。
+FILE_TTL = "31536000"
+
+route = { pattern = "__BASE_URL_HOST__", custom_domain = true }
+
+[[kv_namespaces]]
+binding = "PB"
+id = "__PB_KV_ID__"
+
+[[kv_namespaces]]
+binding = "PBIMGS"
+id = "__PBIMGS_KV_ID__"
+
+[site]
+bucket = "./static/dist"

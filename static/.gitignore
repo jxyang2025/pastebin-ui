@@ -11,6 +11,10 @@ node_modules
 dist
 dist-ssr
 
+# 本地环境变量不入库
+.env.local
+.env.*.local
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -21,3 +25,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Vite 自动生成的临时配置文件
+vite.config.ts.timestamp-*

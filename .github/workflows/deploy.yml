@@ -6,27 +6,49 @@ on:
       - main
   workflow_dispatch:
 
+# 只允许一个部署任务同时进行，避免并发写 KV 绑定
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     name: Deploy
     steps:
-      - uses: actions/checkout@v2
-      - name: Use Node.js
-        uses: actions/setup-node@v2
-        with:
-          node-version: '18'
+      - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 仓库使用 yarn v1 锁文件，固定版本避免解析到意外的 yarn 版本
       - name: Install Yarn
-        run: npm i -g yarn
+        run: npm i -g yarn@1.22.22
 
       - name: Build frontend
-        run: cd static && yarn install && yarn build
+        working-directory: ./static
+        run: |
+          yarn install --frozen-lockfile
+          yarn build
 
-      - name: Install Dependencies
-        run: yarn install
+      - name: Install worker dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Type check worker
+        run: npx tsc --noEmit
+
+      - name: Render wrangler.toml from secrets
+        env:
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          PB_KV_ID: ${{ secrets.PB_KV_ID }}
+          PBIMGS_KV_ID: ${{ secrets.PBIMGS_KV_ID }}
+          BASE_URL: ${{ vars.BASE_URL }}
+          ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
+        run: node scripts/gen-wrangler.mjs
 
       - name: Publish
-        uses: cloudflare/wrangler-action@3.0.0
+        uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}

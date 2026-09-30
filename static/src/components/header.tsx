@@ -26,7 +26,7 @@ export default function Header() {
           to="/"
           className="flex items-center border-gray-200 dark:border-gray-600 md:mb-0 md:me-4 md:border-e md:pe-4"
         >
-          <img src={logoIcon} className="me-2 h-6" alt="Flowbite Logo" />
+          <img src={logoIcon} className="me-2 h-6" alt="PasteShare" />
           <span className="self-center whitespace-nowrap text-lg font-semibold dark:text-white">
             PasteShare
           </span>
@@ -43,12 +43,13 @@ export default function Header() {
       </div>
       <div className="flex flex-shrink-0 items-center gap-2">
         <a
-          href="https://github.com/xiadd/pastebin-worker"
+          href="https://github.com/jxyang2025/pastebin-ui"
           target="_blank"
           rel="noopener noreferrer"
           className="w-6"
+          aria-label="GitHub"
         >
-          <img src={githubIcon} />
+          <img src={githubIcon} alt="GitHub" />
         </a>
 
         <Dropdown
@@ -75,7 +76,7 @@ export default function Header() {
           trigger={["click"]}
         >
           <button className="flex gap-2">
-            <img src={localeIcon} className="w-6" />
+            <img src={localeIcon} className="w-6" alt="" />
             {t(i18n.language)}
           </button>
         </Dropdown>

@@ -1,0 +1,5 @@
+# 本地开发用的 Worker 变量（wrangler dev 会自动加载 .dev.vars）
+# 真实值请自己填写，本文件不入库。
+BASE_URL=http://localhost:8787
+ALLOWED_ORIGINS=http://localhost:5173,http://localhost:8787
+FILE_TTL=31536000

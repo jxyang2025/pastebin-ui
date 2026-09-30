@@ -3,3 +3,11 @@ node_modules
 .cache
 .wrangler
 *.sh
+
+# 部署配置含 account_id / KV namespace id，不入库（模板见 wrangler.toml.example）
+wrangler.toml
+
+# 本地敏感变量
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
