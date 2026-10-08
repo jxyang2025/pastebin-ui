@@ -55,6 +55,7 @@ from the items below (template: `wrangler.toml.example`):
 | Secret | `CF_ACCOUNT_ID` | ✅ | Cloudflare Account ID |
 | Secret | `PB_KV_ID` | ✅ | Namespace id of the text KV (`PB`) |
 | Secret | `PBIMGS_KV_ID` | ✅ | Namespace id of the file KV (`PBIMGS`) |
+| Secret | `ADMIN_TOKEN` | ⬜ | Admin console token. **Leave it unset and the console stays fully disabled** (`/api/admin/*` returns 503) |
 | Variable | `BASE_URL` | ✅ | Site URL, e.g. `https://note.example.com` |
 | Variable | `ALLOWED_ORIGINS` | ⬜ | Comma-separated origins allowed to call the API; defaults to `BASE_URL` |
 
@@ -196,6 +197,70 @@ Refer to [Generate `wrangler.toml`](#generate-wranglertoml) in the deployment do
 
 Refer to [Deployment Documentation](#deployment-documentation).
 
+## Admin Console
+
+The site ships with an admin console for **reviewing, copying and deleting** everything
+anyone has uploaded, sorted by upload time. Its main purpose is to catch and take down
+illegal or spammy content quickly.
+
+- URL: `https://<your-domain>/admin`
+- Auth: you enter `ADMIN_TOKEN` on the login screen and the frontend sends it as the
+  `x-admin-token` header. The token lives in `sessionStorage` and is dropped when the
+  tab closes.
+
+### Configure the token
+
+`ADMIN_TOKEN` is a credential, so it is **deliberately kept out of `wrangler.toml`**.
+Pick whichever option suits you:
+
+1. **GitHub Actions (recommended)**: add `ADMIN_TOKEN` to the repository Secrets.
+   `deploy.yml` already hands it to wrangler-action, which stores it as an encrypted
+   Worker secret.
+2. **Manually**:
+   ```bash
+   wrangler secret put ADMIN_TOKEN
+   ```
+3. **Local development**: put it in `.dev.vars` (already git-ignored):
+   ```
+   ADMIN_TOKEN=dev-token
+   ```
+
+> If it is not configured, every `/api/admin/*` request returns `503` and the console
+> stays disabled. That is intentional — it guarantees there is never an
+> unauthenticated admin entry point.
+
+### What it can do
+
+| Feature | Description |
+| --- | --- |
+| Browse by time | Newest first by default, switchable to oldest first |
+| Filter by type | All / text / file |
+| Keyword search | Matches ID, file name, content preview and source IP |
+| Deep scan | Reads every body to match a keyword (slower, capped). Use it to hunt for sensitive words inside content |
+| Preview | Open an item to see the full body, file info and source IP / UA |
+| Copy | One-click copy of the share link or the body, handy for keeping evidence |
+| Delete | Delete one item, or tick several and delete in bulk. Links stop working immediately |
+| Source tracing | Every record carries the uploader's IP and User-Agent (disable with `LOG_CLIENT_INFO=0`) |
+
+### Why "sort by upload time" needs explaining
+
+Cloudflare KV's `list()` returns keys in lexicographic order only; it exposes
+**neither a creation time nor any notion of business time**. So the sorting works
+like this:
+
+- on upload, `create_time` (a millisecond timestamp) is written into the KV metadata;
+- when listing, that metadata — which `list()` returns anyway — is sorted in memory.
+
+One caveat, stated plainly: **items uploaded before this code was deployed have no
+`create_time`**. The console labels them "Unknown time" and pins them to the bottom of
+the list, but viewing, copying and deleting still work normally.
+
+### Uploader info and privacy
+
+The uploader's IP and User-Agent are recorded in metadata by default; that is the only
+lead available when you need to trace someone after the fact. If you would rather not
+keep it, set `LOG_CLIENT_INFO` to `0` (the source column then stays empty).
+
 ## API
 
 | Method | Path | Description |
@@ -205,6 +270,12 @@ Refer to [Deployment Documentation](#deployment-documentation).
 | `POST` | `/api/upload` | Upload a file (form field `file`, max 25MB) |
 | `GET` | `/raw/:id?share_password=` | Fetch the content as plain text |
 | `GET` | `/file/:id` | Fetch a file; only images are inlined, everything else is forced as a download |
+| `GET` | `/api/admin/list` | Console listing. Query: `type` (all/text/file), `keyword`, `order` (desc/asc), `page`, `pageSize` |
+| `GET` | `/api/admin/content?id=&type=` | Fetch one full item (text returns the body, file returns metadata) |
+| `GET` | `/api/admin/search?keyword=` | Read bodies for a full-text match; scans at most 300 items |
+| `POST` | `/api/admin/delete` | Delete. Body: `{ items: [{ id, type }] }`, up to 200 per call |
+
+> Every `/api/admin/*` route requires the `x-admin-token` header.
 
 ## Security Notes
 
@@ -215,6 +286,13 @@ Refer to [Deployment Documentation](#deployment-documentation).
 - **Passwords**: only `SHA-256(salt + password)` is stored, compared in constant time,
   and never returned by the API.
 - **CORS**: `/api/*` only allows origins listed in `ALLOWED_ORIGINS`.
+- **Admin console**: `/api/admin/*` verifies `x-admin-token` in constant time and adds a
+  300ms delay on failure; with `ADMIN_TOKEN` unset the whole group returns 503. These
+  routes send **no CORS headers at all**, so cross-origin calls are rejected during the
+  browser preflight and there is no CSRF surface. Content is always rendered as plain
+  text in the console — someone else's upload is never executed as HTML.
+- **Uploader records**: metadata keeps the uploader's IP / User-Agent
+  (turn off with `LOG_CLIENT_INFO=0`) so illegal uploads can be traced afterwards.
 - **Write protection (recommended)**: `/api/create` and `/api/upload` are fully public.
   Consider adding
   1. **Security > WAF > Rate limiting rules** for `/api/*` per IP;

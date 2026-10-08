@@ -20,6 +20,8 @@ function lazyRoute(loader: () => Promise<{ default: ComponentType<any> }>) {
 const CreatePaste = lazyRoute(() => import("./pages"));
 const Detail = lazyRoute(() => import("./pages/detail"));
 const Tutorial = lazyRoute(() => import("./pages/tutorial"));
+// 管理后台只在需要时加载，普通访客不会为它付任何体积
+const Admin = lazyRoute(() => import("./pages/admin"));
 
 function App() {
   return (
@@ -29,6 +31,7 @@ function App() {
         <Route path="/" component={CreatePaste} />
         <Route path="/detail/:id" component={Detail} />
         <Route path="/tutorial" component={Tutorial} />
+        <Route path="/admin" component={Admin} />
       </Suspense>
       <Toaster position="top-center" reverseOrder={false} />
     </div>

@@ -9,6 +9,20 @@ import config from './config';
 const MAX_TEXT_SIZE = 1024 * 1024 * 25;
 const MAX_FILE_SIZE = 1024 * 1024 * 25;
 
+/**
+ * metadata 整体上限 1024 字节（JSON 序列化后）。
+ * 中文按最坏情况 6 字节/字（\uXXXX 转义）估算，
+ * 下面这几个截断值是给 hash/salt/时间戳等字段留足空间后的结果，别随意调大。
+ */
+const PREVIEW_LENGTH = 40;
+const UA_MAX_LENGTH = 50;
+const IP_MAX_LENGTH = 45;
+
+/** 管理后台列表每页上限 */
+const ADMIN_PAGE_MAX = 200;
+/** KV list 单次最多 1000 条，最多翻这么多页，防止极端情况下打满 CPU */
+const ADMIN_SCAN_MAX_PAGES = 10;
+
 /** KV expirationTtl 的最小值是 60 秒，小于它会直接抛错 */
 const MIN_TTL = 60;
 /** 文件默认保留 1 年，避免 PBIMGS 只增不减 */
@@ -34,6 +48,20 @@ type Bindings = {
   BASE_URL?: string;
   ALLOWED_ORIGINS?: string;
   FILE_TTL?: string;
+  /** 管理后台口令；未配置时整个 /api/admin/* 直接禁用 */
+  ADMIN_TOKEN?: string;
+  /** 设为 '0' 则不再记录上传者 IP / UA */
+  LOG_CLIENT_INFO?: string;
+};
+
+/**
+ * 上传者信息。记录它是「事后追责」的唯一线索：
+ * 一旦有人上传违法内容，只有 IP 才能定位到人。
+ * 通过 LOG_CLIENT_INFO=0 可以关掉。
+ */
+type ClientInfo = {
+  ip?: string;
+  ua?: string;
 };
 
 type PasteMetadata = {
@@ -42,12 +70,20 @@ type PasteMetadata = {
   has_password?: boolean;
   share_password_hash?: string;
   share_password_salt?: string;
-};
+  /**
+   * 内容开头若干字符。存进 metadata 有两个好处：
+   * 列表页无需回读 value 就能展示摘要，关键词搜索也能直接命中。
+   * 注意 KV metadata 有 1024 字节上限，长度必须克制（见 PREVIEW_LENGTH）。
+   */
+  preview?: string;
+} & ClientInfo;
 
 type FileMetadata = {
   mimeType: string;
   name: string;
-};
+  create_time?: number;
+  size?: number;
+} & ClientInfo;
 
 const app = new Hono<{ Bindings: Bindings }>();
 
@@ -106,11 +142,76 @@ async function generateId(kv: KVNamespace): Promise<string> {
   return customAlphabet(ID_SEED, 12)();
 }
 
+/** 取出上传者信息；ADMIN 可在 wrangler 里用 LOG_CLIENT_INFO=0 关闭 */
+function clientInfo(c: {
+  env: Bindings;
+  req: { header: (name: string) => string | undefined };
+}): ClientInfo {
+  if ((c.env.LOG_CLIENT_INFO ?? '1') === '0') return {};
+
+  const ip =
+    c.req.header('cf-connecting-ip') ??
+    c.req.header('x-forwarded-for')?.split(',')[0]?.trim();
+  const ua = c.req.header('user-agent');
+
+  const info: ClientInfo = {};
+  if (ip) info.ip = ip.slice(0, IP_MAX_LENGTH);
+  if (ua) info.ua = ua.slice(0, UA_MAX_LENGTH);
+  return info;
+}
+
+/** 截取内容开头作为 metadata 里的摘要 */
+function makePreview(content: string): string {
+  // 压缩掉换行和连续空白，避免摘要里全是空行看不到重点
+  return content.slice(0, PREVIEW_LENGTH * 4).replace(/\s+/g, ' ').trim().slice(0, PREVIEW_LENGTH);
+}
+
+/**
+ * 把某个 namespace 的 key 全部拉平。
+ *
+ * KV 的 list() 只按 key 的字典序返回，完全不认识「上传时间」，
+ * 所以时间排序只能靠 metadata 里的 create_time 在内存里做。
+ * 好消息是 list() 默认就会把每个 key 的 metadata 一起带回来，不必额外回读 value。
+ * 单次最多 1000 条，需要 cursor 翻页。
+ */
+async function listAllKeys(kv: KVNamespace): Promise<
+  Array<{ name: string; expiration?: number; metadata?: unknown }>
+> {
+  const out: Array<{ name: string; expiration?: number; metadata?: unknown }> = [];
+  let cursor: string | undefined;
+
+  for (let page = 0; page < ADMIN_SCAN_MAX_PAGES; page += 1) {
+    const res = await kv.list({ cursor, limit: 1000 });
+    for (const key of res.keys) {
+      out.push({
+        name: key.name,
+        expiration: key.expiration,
+        metadata: key.metadata,
+      });
+    }
+    if (res.list_complete || !res.cursor) break;
+    cursor = res.cursor;
+  }
+
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // 中间件
 // ---------------------------------------------------------------------------
 
 app.use('/api/*', async (c, next) => {
+  /*
+   * 管理接口刻意不走 CORS：一个 Access-Control-* 头都不发。
+   * 浏览器在预检阶段拿不到许可就会直接拦掉跨域请求，
+   * 而且 /api/admin/* 强制要求自定义头 x-admin-token，
+   * 自定义头本身就会触发预检，于是 CSRF 也一并挡住了。
+   */
+  if (c.req.path.startsWith('/api/admin/')) {
+    c.header('Cache-Control', 'no-store');
+    return next();
+  }
+
   const allowed = (c.env.ALLOWED_ORIGINS ?? '')
     .split(',')
     .map((item) => item.trim())
@@ -150,6 +251,9 @@ app.onError((err, c) => {
 // ---------------------------------------------------------------------------
 
 app.get('/detail/*', serveStatic({ path: './index.html' }));
+// 管理后台是前端路由，刷新时需要回退到同一个入口
+app.get('/admin', serveStatic({ path: './index.html' }));
+app.get('/admin/*', serveStatic({ path: './index.html' }));
 app.get('/*', serveStatic({ root: './' }));
 
 // ---------------------------------------------------------------------------
@@ -220,6 +324,8 @@ app.post('/api/create', async (c) => {
   const metadata: PasteMetadata = {
     language: typeof language === 'string' && language ? language : 'text',
     create_time: createTime,
+    preview: makePreview(content),
+    ...clientInfo(c),
   };
 
   // 明文密码只在此处回给创建者一次，KV 里只存哈希
@@ -313,6 +419,9 @@ app.post('/api/upload', async (c) => {
   const metadata: FileMetadata = {
     mimeType: file.type || 'application/octet-stream',
     name: file.name || 'file',
+    create_time: Date.now(),
+    size: file.size,
+    ...clientInfo(c),
   };
 
   await c.env.PBIMGS.put(id, await file.arrayBuffer(), {
@@ -348,6 +457,310 @@ app.get('/file/:id', async (c) => {
       // id 随机且内容不可变，可以放心长缓存，省掉绝大多数 KV 读
       'Cache-Control': 'public, max-age=31536000, immutable',
     },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 管理后台
+// ---------------------------------------------------------------------------
+//
+// 三个设计约束，先讲清楚再看代码：
+//
+// 1. 为什么排序要绕这么大弯？
+//    KV 的 list() 只保证 key 的字典序，既不返回创建时间也不认识业务时间。
+//    所以「按上传时间排序」只能：写入时把 create_time 塞进 metadata，
+//    列表时 includeMetadata 取回来在内存里排。
+//    代价是：本次改动之前上传的老数据没有该字段，只能标记「时间未知」沉到列表底部。
+//
+// 2. 为什么摘要在 metadata 里？
+//    列表要显示内容摘要就得回读 value，1000 条 = 1000 次 KV 读，又慢又费额度。
+//    metadata 里存 40 字摘要后，列表接口零额外开销就能展示和搜索。
+//
+// 3. 鉴权
+//    ADMIN_TOKEN 从 wrangler secret 注入。未配置就直接 503 禁用整个后台，
+//    绝不出现「默认无口令」的管理入口。口令比较是常量时间，失败再拖 300ms。
+
+type AdminItem = {
+  id: string;
+  type: 'text' | 'file';
+  /** 老数据没有时间戳，用 null 表示并固定排在最后 */
+  create_time: number | null;
+  url: string;
+  expiration?: number;
+  language?: string;
+  has_password?: boolean;
+  name?: string;
+  mimeType?: string;
+  size?: number | null;
+  preview?: string;
+  ip?: string;
+  ua?: string;
+};
+
+app.use('/api/admin/*', async (c, next) => {
+  const expected = (c.env.ADMIN_TOKEN ?? '').trim();
+  if (!expected) {
+    return c.json(
+      { error: 'Admin console disabled: ADMIN_TOKEN is not configured', code: 503 },
+      503,
+    );
+  }
+
+  const provided = (c.req.header('x-admin-token') ?? '').trim();
+  if (!provided || !timingSafeEqual(provided, expected)) {
+    // 就算比较失败也拖一下，抬高在线爆破的成本
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return c.json({ error: 'Unauthorized', code: 401 }, 401);
+  }
+
+  return next();
+});
+
+/** 汇总文本与文件的元信息，列表与搜索共用 */
+async function collectItems(
+  env: Bindings,
+  origin: string,
+  want: { text: boolean; file: boolean },
+): Promise<{
+  items: AdminItem[];
+  textCount: number;
+  fileCount: number;
+}> {
+  const [textKeys, fileKeys] = await Promise.all([
+    want.text ? listAllKeys(env.PB) : Promise.resolve([]),
+    want.file ? listAllKeys(env.PBIMGS) : Promise.resolve([]),
+  ]);
+
+  const items: AdminItem[] = [];
+
+  for (const key of textKeys) {
+    const meta = (key.metadata ?? {}) as Partial<PasteMetadata>;
+    items.push({
+      id: key.name,
+      type: 'text',
+      create_time: typeof meta.create_time === 'number' ? meta.create_time : null,
+      url: `${origin}/detail/${key.name}`,
+      expiration: key.expiration,
+      language: meta.language ?? 'text',
+      has_password: Boolean(meta.has_password),
+      preview: meta.preview,
+      ip: meta.ip,
+      ua: meta.ua,
+    });
+  }
+
+  for (const key of fileKeys) {
+    const meta = (key.metadata ?? {}) as Partial<FileMetadata>;
+    items.push({
+      id: key.name,
+      type: 'file',
+      create_time: typeof meta.create_time === 'number' ? meta.create_time : null,
+      url: `${origin}/file/${key.name}`,
+      expiration: key.expiration,
+      name: meta.name,
+      mimeType: meta.mimeType,
+      size: typeof meta.size === 'number' ? meta.size : null,
+      ip: meta.ip,
+      ua: meta.ua,
+    });
+  }
+
+  return { items, textCount: textKeys.length, fileCount: fileKeys.length };
+}
+
+/** 按上传时间排序；时间未知的老数据固定沉底，不参与时间轴 */
+function sortByTime(items: AdminItem[], order: 'asc' | 'desc'): void {
+  items.sort((a, b) => {
+    if (a.create_time === null && b.create_time === null) return a.id.localeCompare(b.id);
+    if (a.create_time === null) return 1;
+    if (b.create_time === null) return -1;
+    const delta =
+      order === 'asc' ? a.create_time - b.create_time : b.create_time - a.create_time;
+    return delta !== 0 ? delta : a.id.localeCompare(b.id);
+  });
+}
+
+/** 列表页的轻量匹配：只查元信息与摘要，不回读正文 */
+function matchKeyword(item: AdminItem, keyword: string): boolean {
+  return [item.id, item.name, item.mimeType, item.language, item.preview, item.ip, item.ua]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+    .includes(keyword);
+}
+
+const ID_PATTERN = /^[0-9A-Za-z_-]{1,64}$/;
+
+app.get('/api/admin/list', async (c) => {
+  const type = c.req.query('type') ?? 'all';
+  const keyword = (c.req.query('keyword') ?? '').trim().toLowerCase();
+  const order = c.req.query('order') === 'asc' ? 'asc' : 'desc';
+  const page = Math.max(1, Number(c.req.query('page') ?? 1) || 1);
+  const pageSize = Math.min(
+    ADMIN_PAGE_MAX,
+    Math.max(1, Number(c.req.query('pageSize') ?? 20) || 20),
+  );
+
+  const { items, textCount, fileCount } = await collectItems(c.env, baseUrl(c), {
+    text: type !== 'file',
+    file: type !== 'text',
+  });
+
+  const unknownTime = items.filter((item) => item.create_time === null).length;
+  const filtered = keyword ? items.filter((item) => matchKeyword(item, keyword)) : items;
+  sortByTime(filtered, order);
+
+  const total = filtered.length;
+  const start = (page - 1) * pageSize;
+
+  return c.json({
+    items: filtered.slice(start, start + pageSize),
+    total,
+    page,
+    pageSize,
+    pageCount: Math.max(1, Math.ceil(total / pageSize)),
+    textCount,
+    fileCount,
+    unknownTime,
+    // 已经翻到扫描上限时提示，免得管理员误以为「东西就这么多」
+    truncated:
+      textCount >= 1000 * ADMIN_SCAN_MAX_PAGES || fileCount >= 1000 * ADMIN_SCAN_MAX_PAGES,
+  });
+});
+
+/** 取单条完整内容：文本给正文，文件给元信息+直链 */
+app.get('/api/admin/content', async (c) => {
+  const id = c.req.query('id');
+  const type = c.req.query('type') === 'file' ? 'file' : 'text';
+
+  if (!id || !ID_PATTERN.test(id)) {
+    return c.json({ error: 'Valid id is required', code: 400 }, 400);
+  }
+
+  if (type === 'file') {
+    const res = await c.env.PBIMGS.getWithMetadata<FileMetadata>(id, 'arrayBuffer');
+    if (!res.value) return c.json({ error: 'Not found', code: 404 }, 404);
+    const meta = (res.metadata ?? {}) as Partial<FileMetadata>;
+    return c.json({
+      type: 'file',
+      id,
+      name: meta.name ?? 'file',
+      mimeType: meta.mimeType ?? 'application/octet-stream',
+      size: res.value.byteLength,
+      create_time: meta.create_time ?? null,
+      ip: meta.ip,
+      ua: meta.ua,
+      url: `${baseUrl(c)}/file/${id}`,
+    });
+  }
+
+  const res = await c.env.PB.getWithMetadata<PasteMetadata>(id);
+  if (!res.value) return c.json({ error: 'Not found', code: 404 }, 404);
+  const meta = (res.metadata ?? {}) as Partial<PasteMetadata>;
+
+  return c.json({
+    type: 'text',
+    id,
+    content: res.value,
+    language: meta.language ?? 'text',
+    has_password: Boolean(meta.has_password),
+    create_time: meta.create_time ?? null,
+    ip: meta.ip,
+    ua: meta.ua,
+    url: `${baseUrl(c)}/detail/${id}`,
+  });
+});
+
+/** 删除：支持单条与批量，前端一次最多提 200 条 */
+app.post('/api/admin/delete', async (c) => {
+  let body: { items?: unknown };
+  try {
+    body = (await c.req.json()) as { items?: unknown };
+  } catch {
+    return c.json({ error: 'Invalid JSON body', code: 400 }, 400);
+  }
+
+  const list = Array.isArray(body?.items) ? body.items : [];
+  if (!list.length) {
+    return c.json({ error: 'items is required', code: 400 }, 400);
+  }
+  if (list.length > 200) {
+    return c.json({ error: 'Too many items in one request (max 200)', code: 400 }, 400);
+  }
+
+  const results = await Promise.all(
+    list.map(async (raw) => {
+      const id = typeof raw?.id === 'string' ? raw.id.trim() : '';
+      const itemType: 'text' | 'file' = raw?.type === 'file' ? 'file' : 'text';
+
+      if (!ID_PATTERN.test(id)) {
+        return { id, type: itemType, ok: false, error: 'Invalid id' };
+      }
+
+      try {
+        // 按类型删除，避免误删另一个 namespace 里的同名 id
+        await (itemType === 'file' ? c.env.PBIMGS : c.env.PB).delete(id);
+        return { id, type: itemType, ok: true };
+      } catch (error) {
+        console.error('[pastebin] delete failed:', itemType, id, error);
+        return { id, type: itemType, ok: false, error: 'Delete failed' };
+      }
+    }),
+  );
+
+  const deleted = results.filter((item) => item.ok).length;
+  return c.json({ deleted, failed: results.length - deleted, results });
+});
+
+/**
+ * 深度排查：回读正文做全文匹配。
+ * 列表页的搜索只覆盖元信息与摘要，要查正文里有没有关键词就得靠这个接口。
+ * 为了不把 CPU 打满，扫描条数与并发都设了上限。
+ */
+const SEARCH_SCAN_MAX = 300;
+const SEARCH_BATCH = 20;
+
+app.get('/api/admin/search', async (c) => {
+  const keyword = (c.req.query('keyword') ?? '').trim().toLowerCase();
+  const limit = Math.min(100, Math.max(1, Number(c.req.query('limit') ?? 30) || 30));
+
+  if (keyword.length < 2) {
+    return c.json({ error: 'keyword must be at least 2 characters', code: 400 }, 400);
+  }
+
+  const { items } = await collectItems(c.env, baseUrl(c), { text: true, file: false });
+  sortByTime(items, 'desc');
+
+  const hits: Array<AdminItem & { snippet: string }> = [];
+  let scanned = 0;
+
+  for (let offset = 0; offset < items.length; offset += SEARCH_BATCH) {
+    if (hits.length >= limit || scanned >= SEARCH_SCAN_MAX) break;
+
+    const batch = items.slice(offset, offset + SEARCH_BATCH);
+    scanned += batch.length;
+
+    const values = await Promise.all(batch.map((item) => c.env.PB.get(item.id)));
+
+    values.forEach((value, index) => {
+      if (!value || hits.length >= limit) return;
+      const position = value.toLowerCase().indexOf(keyword);
+      if (position === -1) return;
+      const from = Math.max(0, position - 40);
+      hits.push({
+        ...batch[index],
+        snippet: value
+          .slice(from, position + keyword.length + 60)
+          .replace(/\s+/g, ' '),
+      });
+    });
+  }
+
+  return c.json({
+    items: hits,
+    scanned,
+    truncated: scanned >= SEARCH_SCAN_MAX,
+    scanLimit: SEARCH_SCAN_MAX,
   });
 });
 

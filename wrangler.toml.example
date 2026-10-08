@@ -14,6 +14,13 @@
 #         ALLOWED_ORIGINS   ← GitHub Variables （允许跨域调用 API 的来源，逗号分隔）
 #
 #   占位符（__XXX__）在 CI 中会被自动替换，本地手填时直接覆盖即可。
+#
+#   注意：ADMIN_TOKEN 刻意不走 wrangler.toml，因为它是一串口令、属于机密。
+#   请用下面任意一种方式注入（详见 README 的「管理后台」一节）：
+#     · 线上：GitHub Secret + wrangler-action 的 secrets 参数，或本地执行
+#             wrangler secret put ADMIN_TOKEN
+#     · 本地：写进 .dev.vars（已被 .gitignore 忽略）
+#   未配置时 /api/admin/* 会整体返回 503，后台处于禁用状态，不会出现无口令入口。
 # ============================================================================
 
 name = "pastebin-worker"
@@ -33,6 +40,9 @@ BASE_URL = "__BASE_URL__"
 ALLOWED_ORIGINS = "__ALLOWED_ORIGINS__"
 # 上传文件的保留秒数（默认 1 年）。KV 无 TTL 会导致存储只增不减。
 FILE_TTL = "31536000"
+# 是否记录上传者 IP 与 UA。设为 "0" 关闭。
+# 留着的意义：一旦有人上传违法内容，IP 是唯一能定位到人的线索。
+LOG_CLIENT_INFO = "1"
 
 route = { pattern = "__BASE_URL_HOST__", custom_domain = true }
 

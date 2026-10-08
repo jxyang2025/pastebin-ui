@@ -55,6 +55,7 @@ wrangler.toml.example  部署配置模板（真正的 wrangler.toml 不入库）
 | Secret | `CF_ACCOUNT_ID` | ✅ | Cloudflare Account ID |
 | Secret | `PB_KV_ID` | ✅ | 文本 KV（`PB`）的 namespace id |
 | Secret | `PBIMGS_KV_ID` | ✅ | 文件 KV（`PBIMGS`）的 namespace id |
+| Secret | `ADMIN_TOKEN` | ⬜ | 管理后台口令。**不配置则后台整体禁用**（`/api/admin/*` 返回 503） |
 | Variable | `BASE_URL` | ✅ | 站点地址，如 `https://note.example.com` |
 | Variable | `ALLOWED_ORIGINS` | ⬜ | 允许跨域调用 API 的来源，逗号分隔；默认取 `BASE_URL` |
 
@@ -196,6 +197,62 @@ cd static && yarn install
 
 详见 [部署文档](#部署文档)。
 
+## 管理后台
+
+站点自带一个后台，用来**查看、复制和删除**所有人上传的内容，并按上传时间排序，
+主要用于及时发现并下架违法或垃圾内容。
+
+- 入口：`https://<你的域名>/admin`
+- 鉴权：登录时填 `ADMIN_TOKEN`，前端通过 `x-admin-token` 请求头带给后端；
+  口令只存在浏览器 `sessionStorage`，关掉标签页即失效。
+
+### 配置口令
+
+`ADMIN_TOKEN` 是一串口令、属于机密，**刻意不放进 `wrangler.toml`**。三种方式任选：
+
+1. **GitHub Actions（推荐）**：在仓库 Secrets 里新增 `ADMIN_TOKEN`。
+   `deploy.yml` 已经把它交给 wrangler-action，以加密 secret 的形式写入 Worker。
+2. **手动设置**：
+   ```bash
+   wrangler secret put ADMIN_TOKEN
+   ```
+3. **本地开发**：写进 `.dev.vars`（已被 `.gitignore` 忽略）：
+   ```
+   ADMIN_TOKEN=dev-token
+   ```
+
+> 未配置时 `/api/admin/*` 一律返回 `503`，后台处于禁用状态。
+> 这是刻意设计，避免出现一个没有口令的管理入口。
+
+### 后台能做什么
+
+| 功能 | 说明 |
+| --- | --- |
+| 按时间浏览 | 默认按上传时间**倒序**（最新在前），可切换正序 |
+| 类型筛选 | 全部 / 文本 / 文件 |
+| 关键词搜索 | 匹配 ID、文件名、内容摘要、来源 IP |
+| 全文排查 | 回读正文逐条匹配关键词（较慢，有扫描上限），用于定位正文里的敏感词 |
+| 内容预览 | 点「查看」即可看到完整正文、文件信息和来源 IP / UA |
+| 复制 | 一键复制分享链接或正文，便于取证留存 |
+| 删除 | 单条删除，或勾选后批量删除；删除后链接立即失效 |
+| 来源追溯 | 每条记录带上传者 IP 与 User-Agent（可用 `LOG_CLIENT_INFO=0` 关闭） |
+
+### 关于「按上传时间排序」
+
+Cloudflare KV 的 `list()` 只按 key 的字典序返回，**既不返回创建时间也不认识业务时间**。
+因此这里的排序是这样实现的：
+
+- 上传时把 `create_time`（毫秒时间戳）写进 KV 的 metadata；
+- 列表时利用 `list()` 默认就会带回的 metadata，在内存里排序。
+
+有一点必须说清楚：**这套代码上线之前上传的老数据没有 `create_time`**，
+后台只能把它们标成「时间未知」并固定排在列表最后 —— 但查看、复制、删除都照常可用。
+
+### 上传者信息与隐私
+
+默认会把上传者 IP 和 User-Agent 记进 metadata，这是事后追责的唯一线索。
+如果不需要，把环境变量 `LOG_CLIENT_INFO` 设为 `0` 即可关闭（关闭后来源列会是空的）。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -205,6 +262,12 @@ cd static && yarn install
 | `POST` | `/api/upload` | 上传文件（表单字段 `file`，上限 25MB） |
 | `GET` | `/raw/:id?share_password=` | 以纯文本形式取回内容 |
 | `GET` | `/file/:id` | 取回文件；仅图片类型内联，其余强制下载 |
+| `GET` | `/api/admin/list` | 后台列表。query: `type`(all/text/file)、`keyword`、`order`(desc/asc)、`page`、`pageSize` |
+| `GET` | `/api/admin/content?id=&type=` | 取单条完整内容（文本给正文，文件给元信息） |
+| `GET` | `/api/admin/search?keyword=` | 回读正文做全文匹配，最多扫描 300 条 |
+| `POST` | `/api/admin/delete` | 删除，body: `{ items: [{ id, type }] }`，单次上限 200 条 |
+
+> `/api/admin/*` 全部需要请求头 `x-admin-token`。
 
 ## 安全说明
 
@@ -215,6 +278,12 @@ cd static && yarn install
 - **密码**：服务端只保存 `SHA-256(salt + password)`，比较使用常量时间算法，
   接口不回传密码明文。
 - **CORS**：`/api/*` 默认只允许 `ALLOWED_ORIGINS` 中列出的来源。
+- **管理后台**：`/api/admin/*` 校验 `x-admin-token`，比较为常量时间，失败再额外延迟
+  300ms；未配置 `ADMIN_TOKEN` 时整组接口直接 503。该组接口**不下发任何 CORS 头**，
+  跨域调用会在浏览器预检阶段被拦下，因此也没有 CSRF 面。后台展示上传内容时
+  一律按纯文本渲染，绝不会把别人上传的内容当 HTML 执行。
+- **上传者留存**：metadata 中记录上传者 IP / User-Agent（`LOG_CLIENT_INFO=0` 可关闭），
+  用于违法内容的事后追溯。
 - **写入防护（建议自行开启）**：`/api/create` 与 `/api/upload` 对外完全开放，
   建议在 Cloudflare 控制台加上
   1. **Security > WAF > Rate limiting rules**：按 IP 限制 `/api/*` 的请求频率；

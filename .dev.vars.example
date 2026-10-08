@@ -3,3 +3,9 @@
 BASE_URL=http://localhost:8787
 ALLOWED_ORIGINS=http://localhost:5173,http://localhost:8787
 FILE_TTL=31536000
+# 是否记录上传者 IP / UA，"0" 表示关闭
+LOG_CLIENT_INFO=1
+
+# 管理后台口令。留空或删掉这一行 => /api/admin/* 全部返回 503，后台禁用。
+# 本地随便设一个即可，例如 ADMIN_TOKEN=dev-token
+ADMIN_TOKEN=dev-token

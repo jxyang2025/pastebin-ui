@@ -52,3 +52,9 @@ jobs:
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          # 管理后台口令以加密 secret 写入 Worker，刻意不放进 wrangler.toml。
+          # wrangler-action 会读取同名环境变量后执行 wrangler secret put。
+          secrets: |
+            ADMIN_TOKEN
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
