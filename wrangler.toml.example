@@ -13,7 +13,7 @@
 #         BASE_URL          ← GitHub Variables （站点地址，如 https://example.com）
 #         ALLOWED_ORIGINS   ← GitHub Variables （允许跨域调用 API 的来源，逗号分隔）
 #
-#   占位符（__XXX__）在 CI 中会被自动替换，本地手填时直接覆盖即可。
+#   带下划线的占位符在 CI 中会被自动替换，本地手填时直接覆盖即可。
 #
 #   注意：ADMIN_TOKEN 刻意不走 wrangler.toml，因为它是一串口令、属于机密。
 #   请用下面任意一种方式注入（详见 README 的「管理后台」一节）：
